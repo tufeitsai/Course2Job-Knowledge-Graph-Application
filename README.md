@@ -4,6 +4,8 @@ USC Job Recommendation System based on the courses student took, or based on use
 
 Import required packages from requirements.txt
 
+Some of the LLM API has been removed, please change the api key to your own
+
 Download GoogleNews-vectors-negative300.bin and put it under folder chatbot_web/
 Link for GoogleNews-vector-negative300.bin: https://drive.google.com/file/d/0B7XkCwpI5KDYNlNUTTlSS21pQmM/view?resourcekey=0-wjGZdNAUop6WykTtMip30g
 
