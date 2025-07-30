@@ -1,4 +1,6 @@
 # Course2Job-Knowledge-Graph-Application
+This project is DSCI558 final project colloborate with **Xintong Jiang**, **Shuijing Zhang**.
+
 USC Job Recommendation System based on the courses student took, or based on user's skills. Instead of searching keywords to job hunt, we recommend the jobs that had the skills you have. And also a LLM that helps student to choose courses based their dream career. Such as MLE or SDE.
 
 
@@ -15,5 +17,7 @@ First cd to the chatbot_web folder start the LLM models localhost
 
 Second, back to the main folder(Course2Job) start the streamlit APP
 => streamlit run app.py
+
+Demo video: https://youtu.be/rLswWgHcfxM
 
 Enjoy the application
