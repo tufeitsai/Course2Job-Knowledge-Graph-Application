@@ -1,0 +1,15 @@
+streamlit==1.33.0
+neo4j==5.17.0
+pandas==2.2.1
+numpy==1.26.4
+openai==1.58.1
+Flask
+openai
+rltk
+gensim
+numpy
+pandas
+neo4j
+Fitz
+PyMuPDF
+flask_cors

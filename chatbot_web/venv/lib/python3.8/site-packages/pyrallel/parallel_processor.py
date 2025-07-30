@@ -1,0 +1,549 @@
+"""
+ParallelProcessor utilizes multiple CPU cores to process compute-intensive tasks.
+
+
+If you have a some time-consuming statements in a for-loop and no state is shared among loops, you can map these
+statements to different processes. Assume you need to process a couple of files, you can do this in parallel::
+
+    def mapper(filename):
+        with open(filename) as f_in, open(filename + '.out') as f_out:
+            f_out.write(process_a_file(f_in.read()))
+
+    pp = ParallelProcessor(2, mapper)
+    pp.start()
+
+    for fname in ['file1', 'file2', 'file3', 'file4']:
+        pp.add_task(fname)
+
+    pp.task_done()
+    pp.join()
+
+It's not required to write a cumbersome loop statement if you have iterable object or type (list, generator, etc).
+Instead, you could use `map`::
+
+    pp = ParallelProcessor(2, mapper)
+    pp.start()
+
+    pp.map(['file1', 'file2', 'file3', 'file4'])
+
+    pp.task_done()
+    pp.join()
+
+Usually, some files are small and some are big, it would be better if it can keep all cores busy.
+One way is to send content line by line to each process (assume content is line-separated)::
+
+    def mapper(line, _idx):
+        with open('processed_{}.out'.format(_idx), 'a') as f_out:
+            f_out.write(process_a_line(line))
+
+    pp = ParallelProcessor(2, mapper, enable_process_id=True)
+    pp.start()
+
+    for fname in ['file1', 'file2', 'file3', 'file4']:
+        with open(fname) as f_in:
+            for line in f_in:
+                pp.add_task(line)
+
+    pp.task_done()
+    pp.join()
+
+One problem here is you need to acquire file descriptor every time the mapper is called.
+To avoid this, use Mapper class to replace mapper function.
+It allows user to define how the process is constructed and deconstructed::
+
+    class MyMapper(Mapper):
+        def enter(self):
+            self.f = open('processed_{}.out'.format(self._idx), 'w')
+
+        def exit(self, *args, **kwargs):
+            self.f.close()
+
+        def process(self, line):
+            self.f.write(process_a_line(line))
+
+    pp = ParallelProcessor(..., mapper=MyMapper, ...)
+
+In some situations, you may need to use `collector` to collect data back from child processes to main process::
+
+    processed = []
+
+    def mapper(line):
+        return process_a_line(line)
+
+    def collector(data):
+        processed.append(data)
+
+    pp = ParallelProcessor(2, mapper, collector=collector)
+    pp.start()
+
+    for fname in ['file1', 'file2', 'file3', 'file4']:
+        with open(fname) as f_in:
+            for line in f_in:
+                pp.add_task(line)
+
+    pp.task_done()
+    pp.join()
+
+    print(processed)
+
+You can count the executions in `collector` to estimate the progress. To get the progress of mapper, \
+create a progress function and set it in `ParallelProcessor`::
+
+    def progress(p):
+
+        # print('Total task: {}, Added to queue: {}, Mapper Loaded: {}, Mapper Processed {}'.format(
+        #    p['total'], p['added'], p['loaded'], p['processed']))
+        if p['processed'] % 10 == 0:
+            print('Progress: {}%'.format(100.0 * p['processed'] / p['total']))
+
+    pp = ParallelProcessor(8, mapper=mapper, progress=progress, progress_total=len(tasks))
+    pp.start()
+
+    for t in tasks:
+        pp.add_task(t)
+
+"""
+
+import multiprocess as mp
+import threading
+import queue
+import inspect
+import sys
+import typing
+from typing import Callable, Iterable
+
+from pyrallel import Paralleller
+
+if sys.version_info >= (3, 8):
+    from pyrallel import ShmQueue
+
+
+class Mapper(object):
+    """
+    Mapper class.
+
+    This defines how mapper works.
+
+    The methods will be called in following order::
+
+        enter (one time) -> process (many times) -> exit (one time)
+    """
+    def __init__(self, idx):
+        self._idx = idx
+        self._progress_info = ProgressThread.init_mapper_progress_info()
+
+    def __enter__(self):
+        self.enter()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.exit(exc_type, exc_val, exc_tb)
+
+    def enter(self):
+        """
+        Invoked when subprocess is created and listening the queue.
+        """
+        pass
+
+    def exit(self, *args, **kwargs):
+        """
+        Invoked when subprocess is going to exit. Arguments will be set if exception occurred.
+        """
+        pass
+
+    def process(self, *args, **kwargs):
+        """
+        Same as mapper function, but `self` argument can provide additional context (e.g., `self._idx`).
+        """
+        raise NotImplementedError
+
+
+class CollectorThread(threading.Thread):
+    """
+    Handle collector in main process.
+    Create a thread and call ParallelProcessor.collect().
+    """
+
+    def __init__(self, instance, collector):
+        super(CollectorThread, self).__init__()
+        self.collector = collector
+        self.instance = instance
+
+    def run(self):
+        for batched_collector in self.instance.collect():
+            for o in batched_collector:
+                self.collector(*o)
+
+
+class ProgressThread(threading.Thread):
+    """
+    Progress information in main process.
+    """
+
+    P_ADDED = 0
+    P_LOADED = 1
+    P_PROCESSED = 2
+    P_TOTAL = 3
+
+    def __init__(self, instance, progress, progress_total, num_of_processor):
+        super(ProgressThread, self).__init__()
+        self.progress_info = {
+            ProgressThread.P_ADDED: 0,
+            ProgressThread.P_LOADED: 0,
+            ProgressThread.P_PROCESSED: 0,
+            ProgressThread.P_TOTAL: progress_total
+        }
+        self.mapper_progress_info = [ProgressThread.init_mapper_progress_info() for _ in range(num_of_processor)]
+        self.instance = instance
+        self.progress = progress
+
+    @staticmethod
+    def init_mapper_progress_info():
+        return {ProgressThread.P_LOADED: 0, ProgressThread.P_PROCESSED: 0}
+
+    def refresh_progress_info(self):
+        self.progress_info[ProgressThread.P_LOADED] \
+            = sum([p[ProgressThread.P_LOADED] for p in self.mapper_progress_info])
+        self.progress_info[ProgressThread.P_PROCESSED] \
+            = sum([p[ProgressThread.P_PROCESSED] for p in self.mapper_progress_info])
+
+    def run(self):
+        for idx, mapper_progress_info in self.instance.get_progress():
+            self.mapper_progress_info[idx] = mapper_progress_info
+            self.refresh_progress_info()
+            progress_info = {
+                'added': self.progress_info[ProgressThread.P_ADDED],
+                'loaded': self.progress_info[ProgressThread.P_LOADED],
+                'processed': self.progress_info[ProgressThread.P_PROCESSED],
+                'total': self.progress_info[ProgressThread.P_TOTAL],
+            }
+            self.progress(progress_info)
+
+
+class ParallelProcessor(Paralleller):
+    """
+    Args:
+        num_of_processor (int): Number of processes to use.
+        mapper (Callable / Mapper): Function or subclass of `Mapper` class.
+        max_size_per_mapper_queue (int, optional): Maximum size of mapper queue for one process.
+                                    If it's full, the corresponding process will be blocked.
+                                    0 by default means unlimited.
+        collector (Callable, optional): If the collector data needs to be get in main process (another thread),
+                                set this handler, the arguments are same to the return from mapper.
+                                The return result is one by one, order is arbitrary.
+        max_size_per_collector_queue (int, optional): Maximum size of collector queue for one process.
+                                    If it's full, the corresponding process will be blocked.
+                                    0 by default means unlimited.
+        enable_process_id (bool, optional): If it's true, an additional argument `_idx` (process id) will be
+                                passed to `mapper` function. This has no effect for `Mapper` class.
+                                It defaults to False.
+        batch_size (int, optional): Batch size, defaults to 1.
+        progress (Callable, optional): Progress function, which takes a dictionary as input.
+                                The dictionary contains following keys: `total` can be set by `progress_total`,
+                                `added` indicates the number of tasks has been added to the queue,
+                                `loaded` indicates the number of tasks has been loaded to worker processes,
+                                `processed` indicates the number of tasks has been processed by worker processes.
+                                Defaults to None.
+        progress_total (int, optional): Total number of tasks. Defaults to None.
+        use_shm (bool, optional): When True, and when running on Python version 3.8 or later,
+                                use ShmQueue for higher performance.  Defaults to False.
+        enable_collector_queues (bool, optional): When True, create a collector queue for each
+                                processor.  When False, do not allocate collector queues, saving
+                                resources.  Defaults to True.
+        single_mapper_queue (bool, optional): When True, allocate a single mapper queue that will
+                                be shared between the worker processes.  Sending processes can
+                                go to sleep when the mapper queue is full.  When False, each process
+                                gets its own mapper queue, and CPU-intensive polling may be needed to
+                                find a mapper queue which can accept a new request.
+
+    Note:
+        - Do NOT implement heavy compute-intensive operations in collector, they should be in mapper.
+        - Tune the value for queue size and batch size will optimize performance a lot.
+        - `collector` only collects returns from `mapper` or `Mapper.process`.
+        - The frequency of executing `progress` function depends on CPU.
+    """
+
+    # Command format in queue. Represent in tuple.
+    # The first element of tuple will be command, the rests are arguments or data.
+    # (CMD_XXX, args...)
+    CMD_DATA = 0
+    CMD_STOP = 1
+
+    QSTATS_ON = 0
+    QSTATS_OFF = 1
+
+    def __init__(self, num_of_processor: int, mapper: Callable, max_size_per_mapper_queue: int = 0,
+                 collector: Callable = None, max_size_per_collector_queue: int = 0,
+                 enable_process_id: bool = False, batch_size: int = 1, progress=None, progress_total = None,
+                 use_shm=False, enable_collector_queues=True,
+                 single_mapper_queue: bool = False):
+        self.num_of_processor = num_of_processor
+        self.single_mapper_queue = single_mapper_queue
+        if sys.version_info >= (3, 8):
+            self.collector_queues: typing.Optional[typing.Union[ShmQueue, mp.Queue]]
+        else:
+            self.collector_queues: typing.Optional[mp.Queue]
+        if use_shm:
+            if sys.version_info >= (3, 8):
+                if single_mapper_queue:
+                    self.mapper_queues = [ShmQueue(maxsize=max_size_per_mapper_queue * num_of_processor)]
+                else:
+                    self.mapper_queues = [ShmQueue(maxsize=max_size_per_mapper_queue) for _ in range(num_of_processor)]
+                if enable_collector_queues:
+                    self.collector_queues = [ShmQueue(maxsize=max_size_per_collector_queue) for _ in range(num_of_processor)]
+                else:
+                    self.collector_queues = None
+            else:
+                raise ValueError("shm not available in this version of Python.")
+        else:
+            if single_mapper_queue:
+                self.mapper_queues = [mp.Queue(maxsize=max_size_per_mapper_queue * num_of_processor)]
+            else:
+                self.mapper_queues = [mp.Queue(maxsize=max_size_per_mapper_queue) for _ in range(num_of_processor)]
+            if enable_collector_queues:
+                self.collector_queues = [mp.Queue(maxsize=max_size_per_collector_queue) for _ in range(num_of_processor)]
+                self.collector_qstats = [self.QSTATS_ON for _ in range(num_of_processor)]
+            else:
+                self.collector_queues = None
+                
+        if self.collector_queues is not None:
+            if single_mapper_queue:
+                self.processes = [mp.Process(target=self._run, args=(i, self.mapper_queues[0], self.collector_queues[i]))
+                                  for i in range(num_of_processor)]
+            else:
+                self.processes = [mp.Process(target=self._run, args=(i, self.mapper_queues[i], self.collector_queues[i]))
+                                  for i in range(num_of_processor)]
+        else:
+            if single_mapper_queue:
+                self.processes = [mp.Process(target=self._run, args=(i, self.mapper_queues[0], None))
+                                  for i in range(num_of_processor)]
+            else:
+                self.processes = [mp.Process(target=self._run, args=(i, self.mapper_queues[i], None))
+                                  for i in range(num_of_processor)]
+        if progress is not None:
+            if sys.version_info >= (3, 8):
+                self.progress_queues: typing.Optional[typing.Union[ShmQueue, mp.Queue]]
+            else:
+                self.progress_queues: typing.Optional[mp.Queue]
+            if use_shm:
+                if sys.version_info >= (3, 8):
+                    self.progress_queues = [ShmQueue(maxsize=1) for _ in range(num_of_processor)]
+                else:
+                    raise ValueError("shm not available in this version of Python.")
+            else:
+                self.progress_queues = [mp.Queue(maxsize=1) for _ in range(num_of_processor)]
+            self.progress_qstats = [self.QSTATS_ON for _ in range(num_of_processor)]
+        else:
+            self.progress_queues = None
+        self.progress = progress
+
+        ctx = self
+        if not inspect.isclass(mapper) or not issubclass(mapper, Mapper):
+            class DefaultMapper(Mapper):
+                def process(self, *args, **kwargs):
+                    if ctx.enable_process_id:
+                        kwargs['_idx'] = self._idx
+                    return mapper(*args, **kwargs)
+            self.mapper = DefaultMapper
+        else:
+            self.mapper = mapper
+
+        self.collector = collector
+        self.mapper_queue_index = 0
+        self.enable_process_id = enable_process_id
+        self.batch_size = batch_size
+        self.batch_data = []
+
+        # collector can be handled in each process or in main process after merging (collector needs to be set)
+        # if collector is set, it needs to be handled in main process;
+        # otherwise, it assumes there's no collector.
+        if collector:
+            self.collector_thread = CollectorThread(self, collector)
+
+        if progress:
+            self.progress_thread = ProgressThread(self, progress, progress_total, num_of_processor)
+
+    def start(self):
+        """
+        Start processes and threads.
+        """
+        if self.collector:
+            self.collector_thread.start()
+        if self.progress:
+            self.progress_thread.start()
+        for p in self.processes:
+            p.start()
+
+    def join(self):
+        """
+        Block until processes and threads return.
+        """
+        if self.collector:
+            self.collector_thread.join()
+        if self.progress:
+            self.progress_thread.join()
+        for p in self.processes:
+            p.join()
+        for q in self.mapper_queues:
+            q.close()
+            q.join_thread()
+        if self.collector_queues is not None:
+            for q in self.collector_queues:
+                q.close()
+                q.join_thread()
+        if self.progress_queues is not None:
+            for q in self.progress_queues:
+                q.close()
+                q.join_thread()
+                pass
+
+    def task_done(self):
+        """
+        Indicate that all resources which need to add_task are added to processes.
+        (main process, blocked)
+        """
+        if len(self.batch_data) > 0:
+            self._add_task(self.batch_data)
+            self.batch_data = []
+
+        for i in range(self.num_of_processor):
+            if self.single_mapper_queue:
+                self.mapper_queues[0].put((ParallelProcessor.CMD_STOP,))
+            else:
+                self.mapper_queues[i].put((ParallelProcessor.CMD_STOP,))
+
+    def add_task(self, *args, **kwargs):
+        """
+        Add data to one a mapper queue.
+
+        When a single mapper queue is in use, put the process to sleep if the
+        queue is full.  When multiple mapper queues are in use (one per process),
+        use CPU-intensive polling (round-robin processing) to find the next available
+        queue. (main process, blocked or unblocked depending upon single_mapper_queue)
+        """
+        self.batch_data.append((args, kwargs))
+        if self.progress:
+            self.progress_thread.progress_info[ProgressThread.P_ADDED] += 1
+
+        if len(self.batch_data) == self.batch_size:
+            self._add_task(self.batch_data)
+            self.batch_data = []  # reset buffer
+
+    def _add_task(self, batched_args):
+        if self.single_mapper_queue:
+            self.mapper_queues[0].put((ParallelProcessor.CMD_DATA, batched_args))
+        else:
+            while True:
+                q = self.mapper_queues[self.mapper_queue_index]
+                self.mapper_queue_index = (self.mapper_queue_index + 1) % self.num_of_processor
+                try:
+                    q.put_nowait((ParallelProcessor.CMD_DATA, batched_args))
+                    return  # put in
+                except queue.Full:
+                    continue  # find next available
+
+    def _run(self, idx: int, mapper_queue: mp.Queue, collector_queue: typing.Optional[mp.Queue]):
+        """
+        Process's activity. It handles queue IO and invokes user's mapper handler.
+        (subprocess, blocked, only two queues can be used to communicate with main process)
+        """
+        with self.mapper(idx) as mapper:
+            while True:
+                data = mapper_queue.get()
+                if data[0] == ParallelProcessor.CMD_STOP:
+                    # print(idx, 'stop')
+                    self._update_progress(mapper, finish=True)
+                    if self.collector and collector_queue is not None:
+                        collector_queue.put((ParallelProcessor.CMD_STOP,))
+                    return
+                elif data[0] == ParallelProcessor.CMD_DATA:
+                    batch_result = []
+                    for d in data[1]:
+                        args, kwargs = d[0], d[1]
+                        # print(idx, 'data')
+                        self._update_progress(mapper, type_=ProgressThread.P_LOADED)
+                        result = mapper.process(*args, **kwargs)
+                        self._update_progress(mapper, type_=ProgressThread.P_PROCESSED)
+                        if collector_queue is not None:
+                            if self.collector:
+                                if not isinstance(result, tuple):  # collector must represent as tuple
+                                    result = (result,)
+                            batch_result.append(result)
+                    if collector_queue is not None and len(batch_result) > 0:
+                        collector_queue.put((ParallelProcessor.CMD_DATA, batch_result))
+                        batch_result = []  # reset buffer
+
+    def _update_progress(self, mapper, type_=None, finish=False):
+        if self.progress:
+            try:
+                if not finish:
+                    # No need to ensure the status will be pulled from main process
+                    # so if queue is full just skip this update
+                    mapper._progress_info[type_] += 1
+                    self.progress_queues[mapper._idx].put_nowait( (ParallelProcessor.CMD_DATA, mapper._progress_info) )
+                else:
+                    # update the last progress of each mapper
+                    self.progress_queues[mapper._idx].put( (ParallelProcessor.CMD_STOP, mapper._progress_info) )
+            except queue.Full:
+                pass
+
+    def collect(self):
+        """
+        Get data from collector queue sequentially.
+        (main process, unblocked, using round robin to find next available queue)
+        """
+        if not self.collector:
+            return
+
+        idx = 0
+        while True:
+            # all queues finished
+            if sum([int(s == self.QSTATS_OFF) for s in self.collector_qstats]) == self.num_of_processor:
+                return
+
+            # get next unfinished queue
+            while self.collector_qstats[idx] == self.QSTATS_OFF:
+                idx = (idx + 1) % self.num_of_processor
+            q = self.collector_queues[idx]
+
+            try:
+                data = q.get_nowait()  # get out
+                if data[0] == ParallelProcessor.CMD_STOP:
+                    self.collector_qstats[idx] = self.QSTATS_OFF
+                elif data[0] == ParallelProcessor.CMD_DATA:
+                    yield data[1]
+            except queue.Empty:
+                continue  # find next available
+            finally:
+                idx = (idx + 1) % self.num_of_processor
+
+    def get_progress(self):
+        """
+        Get progress information from each mapper.
+        (main process)
+        """
+        if not self.progress:
+            return
+
+        idx = 0
+        while True:
+            # all queues finished
+            if sum([int(s == self.QSTATS_OFF) for s in self.progress_qstats]) == self.num_of_processor:
+                return
+
+            # get next unfinished queue
+            while self.progress_qstats[idx] == self.QSTATS_OFF:
+                idx = (idx + 1) % self.num_of_processor
+            q = self.progress_queues[idx]
+
+            try:
+                data = q.get_nowait()
+                if data[0] == ParallelProcessor.CMD_STOP:
+                    self.progress_qstats[idx] = self.QSTATS_OFF
+                elif data[0] == ParallelProcessor.CMD_DATA:
+                    pass
+                yield idx, data[1]
+            except queue.Empty:
+                continue  # find next available
+            finally:
+                idx = (idx + 1) % self.num_of_processor

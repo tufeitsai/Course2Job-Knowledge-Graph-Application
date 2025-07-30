@@ -1,0 +1,69 @@
+Metadata-Version: 2.1
+Name: pyrallel.lib
+Version: 0.0.10
+Summary: Yet another easy-to-use python3 parallel library for humans.
+Home-page: https://github.com/usc-isi-i2/pyrallel
+Author: USC/ISI
+Author-email: yixiangy@isi.edu
+License: MIT
+Project-URL: Bug Tracker, https://github.com/usc-isi-i2/pyrallel/issues
+Project-URL: Documentation, https://pyrallel.readthedocs.io
+Project-URL: Source Code, https://github.com/usc-isi-i2/pyrallel
+Platform: UNKNOWN
+Classifier: Programming Language :: Python :: 3
+Classifier: Natural Language :: English
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Software Development :: Libraries
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Description-Content-Type: text/x-rst
+Requires-Dist: typing (>=3.6)
+Requires-Dist: multiprocess (>=0.70)
+Requires-Dist: dill (>=0.3)
+
+Pyrallel
+========
+
+.. begin-intro
+
+Yet another easy-to-use python parallel library for humans.
+
+.. image:: https://img.shields.io/badge/license-MIT-blue.svg
+    :target: https://raw.githubusercontent.com/usc-isi-i2/pyrallel/master/LICENSE
+    :alt: License
+
+.. image:: https://github.com/usc-isi-i2/pyrallel/workflows/Tests/badge.svg?branch=master
+    :target: https://github.com/usc-isi-i2/pyrallel/actions
+    :alt: Github actions
+
+.. image:: https://coveralls.io/repos/github/usc-isi-i2/pyrallel/badge.svg?branch=master
+    :target: https://coveralls.io/github/usc-isi-i2/pyrallel?branch=master
+    :alt: Coveralls
+
+.. image:: https://badge.fury.io/py/pyrallel.lib.svg
+    :target: https://badge.fury.io/py/pyrallel.lib
+    :alt: pypi
+
+.. image:: https://readthedocs.org/projects/pyrallel/badge/?version=latest
+    :target: http://pyrallel.readthedocs.io/en/latest
+    :alt: Documents
+
+- ParallelProcessor: Newbie-friendly process-based parallel computing api.
+- MapReduce: Ultimately simple map and reduce computing model.
+- ShmQueue: Extremely fast shared memory driven general purpose multiprocessing queue.
+
+.. end-intro
+
+Installation
+------------
+::
+
+    pip install pyrallel.lib
+
+
+Documentation
+-------------
+
+`Read the Doc <http://pyrallel.readthedocs.io>`_
+
+

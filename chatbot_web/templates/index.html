@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Course2Job Assistant</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap">
+    <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            background: #f4f7fc;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            height: 100vh;
+        }
+
+        .chat-container {
+            margin-top: 40px;
+            background: white;
+            width: 700px;
+            border-radius: 12px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: #2b7cff;
+            color: white;
+            padding: 16px 24px;
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .chat-box {
+            height: 500px;
+            overflow-y: auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+
+        .chat-box pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            background-color: #f1f1f1;
+            padding: 10px;
+            border-radius: 6px;
+        }
+
+        .input-area {
+            display: flex;
+            flex-direction: column;
+            padding: 16px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        textarea {
+            resize: none;
+            min-height: 40px;
+            max-height: 100px;
+            min-width: 100px;
+            max-width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 16px;
+            line-height: 1.5;
+            overflow-y: hidden;
+            transition: all 0.2s ease;
+        }
+
+        .button-group {
+            margin-top: 10px;
+            display: flex;
+            gap: 12px;
+        }
+
+        button {
+            background-color: #2b7cff;
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background-color 0.2s ease;
+        }
+
+        button:hover {
+            background-color: #1f5fd9;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="header">
+            💬 Course2Job Assistant
+        </div>
+        <div id="chat-box" class="chat-box">
+            <!-- Initial greeting will appear here -->
+        </div>
+        <div class="input-area">
+            <textarea id="user-input" placeholder="Ask me about careers or courses..." oninput="adjustHeight(this)"></textarea>
+            <div class="button-group">
+                <button onclick="sendMessage()"><i class="fas fa-paper-plane"></i> Send</button>
+                <button onclick="newConversation()"><i class="fas fa-comments"></i> New Conversation</button>
+                <button onclick="clearChat()"><i class="fas fa-trash-alt"></i> Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatBox = document.getElementById("chat-box");
+        const userInput = document.getElementById("user-input");
+
+        function appendMessage(sender, message) {
+            const msg = document.createElement("div");
+            msg.innerHTML = `<strong>${sender}:</strong><pre>${message}</pre>`;
+            chatBox.appendChild(msg);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function sendMessage() {
+            const input = userInput.value.trim();
+            if (input === "") return;
+
+            appendMessage("You", input);
+            userInput.value = "";
+            userInput.style.height = "40px"; // Reset height
+
+            fetch("/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: input })
+            })
+            .then(res => res.json())
+            .then(data => {
+                appendMessage("Assistant", data.reply);  // Ensure it's 'reply' based on the backend response
+            });
+        }
+
+        function clearChat() {
+            chatBox.innerHTML = "";
+        }
+
+        function newConversation() {
+            fetch("/new", { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                clearChat();
+                userInput.value = ""; // Clear the input field
+                userInput.style.height = "40px"; // Reset the input field's height
+                appendMessage("Assistant", data.greeting);  // Make sure this is the greeting from the server
+            });
+        }
+
+        function adjustHeight(el) {
+            el.style.height = "40px";  // Reset height
+            el.style.height = (el.scrollHeight) + "px";  // Adjust height to scrollHeight
+        }
+
+        // Initial greet on page load
+        window.onload = () => {
+            fetch("/greet")
+                .then(res => res.json())
+                .then(data => {
+                    appendMessage("Assistant", data.greeting);  // Ensure the initial greeting is shown
+                });
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+Flask
+openai
+rltk
+gensim
+numpy
+pandas
+neo4j
